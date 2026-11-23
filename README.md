@@ -1,128 +1,61 @@
-# DeepSeek HARNESS Quant
+# skill-etf-arbitrage-monitor
 
-自然语言驱动的 A 股量化系统。低频。主观决策 + 写死引擎 + 数据裁决。
+[English](README.en.md)
 
-AI 不预测个股。这是硬约束，不是选项。
+A股 ETF 一二级市场套利 / 折溢价监控 —— 扫描一篮子 ETF，计算 **IOPV/净值 vs 二级价格的折溢价**、**申赎篮子可行性**（现金差额、最小申赎单位、申赎开关）、**套利方向与扣费后毛收益**，标出真正可执行的套利窗口。
 
-```
-驱动层  语言模型        控制 · 挖因子 · 审计 · 牛散蒸馏
-执行层  写死引擎        评分 · 回测 · 风控 · 扫描（确定性 Python，可复现）
-事实层  数据系统        PIT · T+1 · 覆盖率分年核查（可证伪）
-```
+> QuantSkills 组织技能 · 数据源 Pandadata · 组织首个 ETF 方向技能 · 仅供研究参考，不构成投资建议。
 
-## 开始
-
-新用户直接走 [一键部署](docs/一键部署.md)。接入 AI API 后，数据源、配置、验证全交给 AI 向导，不必读本页其余内容。
-
-## 接入 DeepSeek API
-
-接入 API 后，语言模型接管驱动层。控制、挖因子、审计、魔改，全部解锁。不接入，则只有写死引擎，没有 AI。
-
-**前提**：完整包（zip）已内置 HARNESS 运行时；单文件（exe）不含 HARNESS，AI 控制台不可用。系统需 Node.js 18+（https://nodejs.org），无则 HARNESS 自动跳过、量化系统照常。
-
-**最快方式**：双击 `接入API.cmd`，粘贴 Key，自动写入并验证。
+## 快速开始
 
 ```bash
-# 1. 获取 Key
-#    https://platform.deepseek.com/api_keys
+pip install -r requirements.txt   # 纯标准库，无强制依赖
 
-# 2. 复制凭据模板，填入 Key（或直接用接入API.cmd）
-copy harness\home\.credentials.yaml.example harness\home\.credentials.yaml
-#    编辑 .credentials.yaml：
-#    DEEPSEEK_API_KEY: sk-<your-key>
+# 离线演示（无需凭证，内置样本）
+python examples/run_demo.py
 
-# 3. 启动（打印「启动 DeepSeek HARNESS」即集成成功）
-python launcher.py
-#    http://127.0.0.1:8787/control
+# 真实扫描（需 panda_data SDK，见 skill-pandadata-api）
+python scripts/etf_arb_report.py --symbols 510300.SH,159919.SZ,588000.SH \
+    --premium-bps 30 --cost-bps 20 --min-amount 1000 \
+    --out report.json --md report.md
 ```
 
-接入后，直接对话：
+## 折溢价三级数据源（按精度优先）
 
-- **控制系统**：发「1」触发自主推进（审计 / 修复 / 归档，系统自我进化）
-- **挖因子**：说「研究散户情绪量化」——AI 拆假设 → 生成因子 → 九步验证 → 入池或证伪
-- **审计**：让 AI 自查前视、覆盖率、共线性、过拟合
-- **牛散**：7 位牛散人格对话选股，决策自动入远期池验证
-- **魔改**：动态 Cordis 插件热更新，系统行为运行时改，不重编译
+`scripts/premium.py` 自动择优：
 
-其余数据源（Tushare 等）接入后让 AI 指导完成。核心逻辑：先接 AI 的 API，AI 帮你接剩下的。
+1. **接口贴水率**（`get_fund_daily.discount_rate`）—— 按小数比例换算，`0.003 = 30bps`；原始值与单位写入 JSON 追踪。
+2. **成分精算 IOPV**（`get_fund_etf_constituents` 的 `stock_symbol`+`quantity` × 成分股收盘价 + 现金差额 ÷ 最小申赎单位）。
+3. **单位净值代理**（申赎清单 `unit_nav`）。
 
-## 架构
+## 套利判定逻辑
 
-| 模块 | 职责 |
+- **溢价**（价格 > 净值）→ 申购（组建成分/现金申购）→ 二级卖出；需 `purchase_allowed_flag=1`。
+- **折价**（价格 < 净值）→ 二级买入 → 赎回（拿成分卖出）；需 `redemption_allowed_flag=1`。
+- **可执行(actionable)** 需同时满足：折溢价 ≥ 阈值、同日申赎清单与篮子完整、申赎通道开放、扣费后毛收益 > 0、成交额存在且流动性达标。任一关键数据缺失均 fail closed。
+
+这是本技能的核心价值：**过滤掉"看着能套利、实际做不了"的陷阱**（申购暂停 / 单位门槛太高 / 流动性不足）。
+
+## 接口字段（2026-07-27 实测确认）
+
+| 接口 | 关键字段 |
 |---|---|
-| data/ | 数据获取 + 本地缓存 + Point-in-Time（cache.py 唯一读取接口） |
-| factors/ | 因子引擎 + 机会扫描 + 远期池（五池 T+1/5/20/60 验证） |
-| strategy/ | 决策链（L0 择时 → L2 Pitch 审批 → T+1 执行）+ 组合构建 |
-| risk/ | 风控七道（数据审计 / 因子健康 / FRC 排雷 / Beneish / 竞价 / 单因子 / L0 门控） |
-| backtest/ | 回测引擎（T+1 开盘 / 一字板过滤 / 成本模型 / 结论分级） |
-| etf/ | ETF 映射（策略暴露 → 可交易配置） |
-| deck/ ui_v2/ | Web 决策台（9 页，前端零硬编码） |
-| harness/ | DeepSeek HARNESS 运行时（AI 控制台 / 牛散桥 / 动态插件） |
-| config/ | 策略注册表 / ETF 池 / 阈值，全部配置化 + .example 模板 |
+| `get_fund_etf_cr` | cash_component, unit, creation_unit, unit_nav, purchase/redemption_allowed_flag, index_symbol |
+| `get_fund_daily` | close, amount, **discount_rate（贴水率，小数比例）** |
+| `get_fund_etf_constituents` | stock_symbol, quantity, cash_substitution_flag |
 
-## 因子
+## 目录
 
-123+ 因子，全部 A 股本地实证（PIT / T+1 / 分年度）。九步入池，17+ 项证伪留档。
-
-| 维度 | 代表 | 实证 |
-|---|---|---|
-| 换手率 | turn_mid_prox / turnover / turn_std20 | turn_mid_prox ICIR 0.87 |
-| 低波动 | lowvol / std20 / downside_vol | 防守底仓主力 |
-| 反转 | reversal20 / o2c 日内反转族 | limup_ex_5 ICIR 1.24 |
-| 流动性 | amihud | 0.43，多空夏普 1.12 |
-| 彩票/偏度 | max_ret20 / skew20 / rmax | max_ret20 0.64 |
-| 振幅/动量 | amp20 / open_prem_20 | open_prem_20 0.96 |
-| 基本面低频 | f_score / sue / accruals / asset_growth / bp | f_score 120日 0.49 |
-| 短线涨跌停 | limit_up_* / consec_limit_down | 跌停排雷 0.97 |
-| 机构行为 | lhb_jg_cnt_20 / shebao_chg | lhb 0.90 |
-| 行业层 | ind_crowd_60 / ind_rs_20 | 拥挤 0.30 |
-| Alpha101 | alpha015 / alpha050 / alpha006 / alpha003 / alpha044 | alpha015 0.76 |
-
-来源：学术复现 · 开源策略库复刻 · 事件驱动实证 · 牛散蒸馏 · AI 自动挖掘 · 机构资金行为。
-
-## Skill
-
-12 个技能文件，封装方法论 + 资产 + 踩坑记录，AI 按需加载。
-
-- 因子挖掘：factor-mining-workflow · alpha-gpt-factor-mining · alpha-gpt-researcher · backtest-acceptance
-- 牛散蒸馏：niu-san-distillation + 林园 / 陈小群 / 章盟主 / 赵老哥 / 炒股养家 / 冯柳
-- 系统维护：github-maintainer
-
-## 安装与运行
-
-```bash
-# 源码
-pip install -r requirements.txt
-python data/demo/build_demo_db.py    # 生成演示数据
-python launcher.py                   # deck:8787 + HARNESS:3080
-
-# 单文件
-QuantDeck.exe                        # 双击即用，自动开浏览器
-
-# 完整包
-DSHQuant-v1.0.9-Release.zip          # 解压即用，含 HARNESS 运行时
+```
+scripts/     data_source.py · premium.py · basket.py · etf_arb_report.py · formatters.py
+references/  methodology.md · data-fields.md
+examples/    run_demo.py · sample_data/ · sample_report.md
 ```
 
-> **下载注意**：从 Release 页 **Assets 区**下载 `DSHQuant-v1.0.9-Release.zip`（完整包，含 HARNESS 运行时）。
-> **不要**下载页面底部的 "Source code (zip)" —— 那是源码包，harness/node_modules 被排除，没有 AI 控制台。
-> 判断：解压后 `harness\node_modules` 文件夹存在 = 完整包；不存在 = 下错了。
+## 免责
 
-运行要求：Python 3.10+（源码）/ 无（exe）。HARNESS 控制台需 Node.js 18+（可选）。
+折溢价/IOPV 为估算，申赎规则与费率以基金公告为准。数据非实时。仅供研究，不构成投资建议。
 
-## 数据
+## 许可证
 
-数据由用户自行获取。系统不分发数据。
-
-- 行情来自第三方（Tushare 等）。仓库只含获取脚本 + 合成演示数据。
-- 换手率 2019 年前缺失，2019 前换手类结论作废。
-- 配置：`config/params.yaml.example`（Tushare token）。
-
-## 许可
-
-MIT。仅供研究学习。不构成投资建议。
-
-## 文档
-
-[资产盘点](docs/资产盘点.md) · [架构说明](docs/架构.md) · [一键部署](docs/一键部署.md) · [快速开始](docs/快速开始.md) · [HARNESS 接入](docs/HARNESS接入.md) · [数据说明](docs/数据说明.md) · [分钟数据接入](docs/分钟数据接入说明.md)
-
-更新机制：`scripts/update.py`（manifest 驱动，用户配置保护，应用前自动备份）。
+GPL-3.0-only，详见 [LICENSE](LICENSE)。
